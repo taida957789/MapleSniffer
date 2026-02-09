@@ -40,6 +40,9 @@ public:
     void stop();
     bool isRunning() const;
 
+    const std::string& currentInterface() const { return currentInterface_; }
+    const std::string& currentFilter() const { return currentFilter_; }
+
     void setPacketCallback(PacketCallback cb);
 
 private:
@@ -51,6 +54,8 @@ private:
     std::atomic<bool> running_{false};
     std::mutex mutex_;
     PacketCallback callback_;
+    std::string currentInterface_;
+    std::string currentFilter_;
 };
 
 } // namespace maple

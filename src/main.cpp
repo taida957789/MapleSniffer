@@ -18,12 +18,15 @@ int main() {
     std::cout << "=== MapleAuto ===" << std::endl;
 
     maple::Capture capture;
+    maple::Protocol protocol;
     maple::Server server(capture, 8080);
 
     // Wire capture -> protocol -> server
-    capture.setPacketCallback([&server](const maple::RawPacket& raw) {
-        auto pkt = maple::Protocol::parse(raw);
-        server.addPacket(pkt);
+    capture.setPacketCallback([&protocol, &server](const maple::RawPacket& raw) {
+        auto packets = protocol.process(raw);
+        if (!packets.empty()) {
+            server.addPackets(packets);
+        }
     });
 
     server.start();

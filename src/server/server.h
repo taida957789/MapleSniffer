@@ -25,6 +25,7 @@ public:
 
     // Called by capture callback to record packets
     void addPacket(const Packet& pkt);
+    void addPackets(const std::vector<Packet>& pkts);
 
 private:
     void setupRoutes();

@@ -1,6 +1,8 @@
 #include "server.h"
 #include <nlohmann/json.hpp>
 #include <iostream>
+#include <sstream>
+#include <iomanip>
 #include <unordered_map>
 
 // Include embedded web resources if available
@@ -47,6 +49,16 @@ void Server::addPacket(const Packet& pkt) {
     }
 }
 
+void Server::addPackets(const std::vector<Packet>& pkts) {
+    std::lock_guard<std::mutex> lock(packetsMutex_);
+    for (const auto& pkt : pkts) {
+        packets_.push_back(pkt);
+        if (packets_.size() > MAX_PACKETS) {
+            packets_.pop_front();
+        }
+    }
+}
+
 static std::string getMimeType(const std::string& path) {
     if (path.ends_with(".html")) return "text/html";
     if (path.ends_with(".js"))   return "application/javascript";
@@ -60,11 +72,19 @@ static std::string getMimeType(const std::string& path) {
     return "application/octet-stream";
 }
 
+static std::string formatOpcode(uint16_t opcode) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << opcode;
+    return oss.str();
+}
+
 void Server::setupRoutes() {
     // GET /api/status
     svr_.Get("/api/status", [this](const httplib::Request&, httplib::Response& res) {
         json j;
         j["capturing"] = capture_.isRunning();
+        j["interface"] = capture_.currentInterface();
+        j["filter"] = capture_.currentFilter();
         {
             std::lock_guard<std::mutex> lock(packetsMutex_);
             j["packetCount"] = packets_.size();
@@ -144,13 +164,27 @@ void Server::setupRoutes() {
         int idx = 0;
         for (const auto& pkt : packets_) {
             if (idx >= since) {
-                j.push_back({
-                    {"index", idx},
-                    {"timestamp", pkt.timestamp},
-                    {"length", pkt.length},
-                    {"hexDump", pkt.hexDump},
-                    {"inbound", pkt.inbound}
-                });
+                json pktJson;
+                pktJson["index"] = idx;
+                pktJson["timestamp"] = pkt.timestamp;
+                pktJson["length"] = pkt.length;
+                pktJson["hexDump"] = pkt.hexDump;
+                pktJson["outbound"] = pkt.outbound;
+                pktJson["isHandshake"] = pkt.isHandshake;
+
+                if (pkt.isHandshake) {
+                    pktJson["opcode"] = "Handshake";
+                    pktJson["opcodeRaw"] = 0;
+                    pktJson["version"] = pkt.version;
+                    pktJson["subVersion"] = pkt.subVersionStr;
+                    pktJson["locale"] = pkt.locale;
+                } else {
+                    pktJson["opcode"] = formatOpcode(pkt.opcode);
+                    pktJson["opcodeRaw"] = pkt.opcode;
+                }
+
+                pktJson["decrypted"] = !pkt.isHandshake;
+                j.push_back(pktJson);
             }
             idx++;
         }

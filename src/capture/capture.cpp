@@ -138,6 +138,8 @@ bool Capture::start(const std::string& interfaceName, const std::string& bpfFilt
         pcap_freecode(&fp);
     }
 
+    currentInterface_ = interfaceName;
+    currentFilter_ = bpfFilter;
     running_ = true;
     captureThread_ = std::thread(&Capture::captureLoop, this);
 
@@ -163,6 +165,8 @@ void Capture::stop() {
         handle_ = nullptr;
     }
 
+    currentInterface_.clear();
+    currentFilter_.clear();
     std::cout << "[Capture] Stopped." << std::endl;
 }
 

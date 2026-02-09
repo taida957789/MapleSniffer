@@ -12,10 +12,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
     add_compile_options(/EHsc)
+    add_compile_definitions(NOMINMAX)
 endif()
 
 # --- vcpkg dependencies ---
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # --- Npcap SDK (local) ---
 set(NPCAP_SDK_DIR "${CMAKE_SOURCE_DIR}/third_party/npcap-sdk")
@@ -35,6 +37,8 @@ set(SOURCES
     src/main.cpp
     src/capture/capture.cpp
     src/protocol/protocol.cpp
+    src/protocol/maple_aes.cpp
+    src/protocol/maple_stream.cpp
     src/server/server.cpp
     src/input/input.cpp
 )
@@ -50,6 +54,7 @@ target_include_directories(MapleAuto PRIVATE
 target_link_libraries(MapleAuto PRIVATE
     ${NPCAP_LIB_DIR}/wpcap.lib
     nlohmann_json::nlohmann_json
+    OpenSSL::Crypto
 )
 
 # cpp-httplib (header-only, included directly in src/server/)
