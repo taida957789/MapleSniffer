@@ -1,0 +1,26 @@
+# Build output
+out/
+*.exe
+*.obj
+*.pdb
+*.dll
+
+# Exclude build .lib but keep Npcap SDK libs
+*.lib
+!third_party/npcap-sdk/Lib/**
+*.ilk
+
+# VS
+.vs/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Npcap SDK (large third-party binary)
+third_party/npcap-sdk/docs/
+third_party/npcap-sdk/Examples-pcap/
+third_party/npcap-sdk/Examples-remote/
+
+# Generated
+*.user
