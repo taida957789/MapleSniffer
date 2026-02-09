@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 interface NetworkInterface {
   name: string
@@ -36,7 +36,81 @@ const portMax = ref(9999)
 const status = ref<Status>({ capturing: false, packetCount: 0, interface: '', filter: '' })
 const packets = ref<PacketInfo[]>([])
 const error = ref('')
+const activeTab = ref<'all' | 'in' | 'out'>('all')
+const sortOrder = ref<'desc' | 'asc'>('desc')
+const opcodeFilter = ref('')
+const contentSearch = ref('')
+const expandedPackets = ref<Set<number>>(new Set())
 let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function toggleHex(index: number) {
+  const s = expandedPackets.value
+  if (s.has(index)) s.delete(index)
+  else s.add(index)
+}
+
+function isExpanded(index: number): boolean {
+  return expandedPackets.value.has(index)
+}
+
+const HEX_PREVIEW_LINES = 3
+
+function previewHex(hex: string): string {
+  const lines = hex.split('\n')
+  if (lines.length <= HEX_PREVIEW_LINES) return hex
+  return lines.slice(0, HEX_PREVIEW_LINES).join('\n')
+}
+
+function needsTruncation(hex: string): boolean {
+  return hex.split('\n').length > HEX_PREVIEW_LINES
+}
+
+function matchesContent(pkt: PacketInfo, query: string): boolean {
+  if (!query) return true
+  const q = query.trim()
+  // Try as hex bytes: "AB CD" or "ABCD" or "ab cd ef"
+  const hexNorm = q.replace(/\s+/g, '').toLowerCase()
+  if (/^[0-9a-f]+$/.test(hexNorm) && hexNorm.length >= 2 && hexNorm.length % 2 === 0) {
+    // Build spaced hex string for substring match
+    const hexSpaced = hexNorm.match(/.{2}/g)!.join(' ')
+    if (pkt.hexDump.toLowerCase().includes(hexSpaced)) return true
+  }
+  // Try as ASCII: convert query chars to hex bytes and search
+  const asciiHex = Array.from(q).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ')
+  if (pkt.hexDump.toLowerCase().includes(asciiHex)) return true
+  return false
+}
+
+const filteredPackets = computed(() => {
+  let list = packets.value
+  if (activeTab.value === 'in') list = list.filter(p => !p.outbound)
+  else if (activeTab.value === 'out') list = list.filter(p => p.outbound)
+  if (opcodeFilter.value) {
+    const q = opcodeFilter.value.trim().toLowerCase()
+    list = list.filter(p => p.opcode.toLowerCase().includes(q))
+  }
+  if (contentSearch.value) {
+    list = list.filter(p => matchesContent(p, contentSearch.value))
+  }
+  return sortOrder.value === 'desc' ? [...list].reverse() : list
+})
+
+function switchTab(tab: 'all' | 'in' | 'out') {
+  activeTab.value = tab
+  currentPage.value = 1
+}
+
+const inCount = computed(() => packets.value.filter(p => !p.outbound).length)
+const outCount = computed(() => packets.value.filter(p => p.outbound).length)
+
+const PAGE_SIZE = 50
+const currentPage = ref(1)
+
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredPackets.value.length / PAGE_SIZE)))
+const pagedPackets = computed(() => {
+  const start = (currentPage.value - 1) * PAGE_SIZE
+  return filteredPackets.value.slice(start, start + PAGE_SIZE)
+})
 
 function buildFilter(): string {
   return `tcp portrange ${portMin.value}-${portMax.value}`
@@ -82,11 +156,9 @@ async function loadPackets() {
     const newPackets = await fetchJson<PacketInfo[]>(`/api/packets?since=${serverPacketCount}`)
     if (newPackets.length > 0) {
       serverPacketCount += newPackets.length
-      // Prepend newest first (reverse new batch, then prepend)
-      packets.value.unshift(...newPackets.reverse())
-      // Keep only 500
-      if (packets.value.length > 500) {
-        packets.value = packets.value.slice(0, 500)
+      packets.value.push(...newPackets)
+      if (packets.value.length > 2000) {
+        packets.value = packets.value.slice(-2000)
       }
     }
   } catch {}
@@ -208,12 +280,48 @@ onUnmounted(() => {
     </section>
 
     <section class="packets">
-      <h2>Packets ({{ packets.length }})</h2>
+      <div class="packet-toolbar">
+        <div class="tabs">
+          <button
+            class="tab"
+            :class="{ active: activeTab === 'all' }"
+            @click="switchTab('all')"
+          >All ({{ packets.length }})</button>
+          <button
+            class="tab tab-in"
+            :class="{ active: activeTab === 'in' }"
+            @click="switchTab('in')"
+          >IN ({{ inCount }})</button>
+          <button
+            class="tab tab-out"
+            :class="{ active: activeTab === 'out' }"
+            @click="switchTab('out')"
+          >OUT ({{ outCount }})</button>
+        </div>
+        <select v-model="sortOrder" class="sort-select">
+          <option value="desc">Newest First</option>
+          <option value="asc">Oldest First</option>
+        </select>
+      </div>
+      <div class="filter-bar">
+        <input
+          v-model="opcodeFilter"
+          type="text"
+          class="filter-input"
+          placeholder="Filter opcode (e.g. 0x00B5)"
+        />
+        <input
+          v-model="contentSearch"
+          type="text"
+          class="filter-input filter-content"
+          placeholder="Search content (hex: AB CD / ascii: hello)"
+        />
+      </div>
       <div class="packet-list">
-        <div v-if="packets.length === 0" class="empty">
+        <div v-if="filteredPackets.length === 0" class="empty">
           No packets captured yet.
         </div>
-        <div v-for="pkt in packets" :key="pkt.index" class="packet-item" :class="{ handshake: pkt.isHandshake }">
+        <div v-for="pkt in pagedPackets" :key="pkt.index" class="packet-item" :class="{ handshake: pkt.isHandshake }">
           <div class="packet-header">
             <span class="pkt-index">#{{ pkt.index }}</span>
             <span class="pkt-time">{{ formatTimestamp(pkt.timestamp) }}</span>
@@ -228,8 +336,22 @@ onUnmounted(() => {
               v{{ pkt.version }}.{{ pkt.subVersion }} locale={{ pkt.locale }}
             </span>
           </div>
-          <pre class="pkt-hex">{{ pkt.hexDump }}</pre>
+          <div class="pkt-hex-wrap">
+            <pre class="pkt-hex">{{ isExpanded(pkt.index) ? pkt.hexDump : previewHex(pkt.hexDump) }}</pre>
+            <button
+              v-if="needsTruncation(pkt.hexDump)"
+              class="hex-toggle"
+              @click="toggleHex(pkt.index)"
+            >{{ isExpanded(pkt.index) ? 'Collapse' : 'Expand' }}</button>
+          </div>
         </div>
+      </div>
+      <div v-if="totalPages > 1" class="pagination">
+        <button class="page-btn" :disabled="currentPage <= 1" @click="currentPage = 1">&laquo;</button>
+        <button class="page-btn" :disabled="currentPage <= 1" @click="currentPage--">&lsaquo;</button>
+        <span class="page-info">{{ currentPage }} / {{ totalPages }}</span>
+        <button class="page-btn" :disabled="currentPage >= totalPages" @click="currentPage++">&rsaquo;</button>
+        <button class="page-btn" :disabled="currentPage >= totalPages" @click="currentPage = totalPages">&raquo;</button>
       </div>
     </section>
   </div>
@@ -379,10 +501,89 @@ button:hover {
   color: #fff;
 }
 
-.packets h2 {
-  font-size: 18px;
+.packet-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 12px;
-  color: #aaa;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.sort-select {
+  padding: 6px 10px;
+  background: #0f3460;
+  border: 1px solid #1a4a7a;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
+
+.sort-select:focus {
+  border-color: #60d394;
+}
+
+.tab {
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  background: #16213e;
+  color: #888;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+
+.tab:hover {
+  color: #bbb;
+  opacity: 1;
+}
+
+.tab.active {
+  background: #0f3460;
+  color: #e0e0e0;
+  border-color: #1a4a7a;
+}
+
+.tab-in.active {
+  color: #c77dff;
+  border-color: #6a3a8a;
+}
+
+.tab-out.active {
+  color: #7ab8ff;
+  border-color: #2a4a6a;
+}
+
+.filter-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.filter-input {
+  padding: 6px 10px;
+  background: #0f3460;
+  border: 1px solid #1a4a7a;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 13px;
+  outline: none;
+  width: 180px;
+}
+
+.filter-input:focus {
+  border-color: #60d394;
+}
+
+.filter-content {
+  flex: 1;
 }
 
 .packet-list {
@@ -462,6 +663,47 @@ button:hover {
   font-size: 12px;
 }
 
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 0;
+}
+
+.page-btn {
+  padding: 4px 12px;
+  font-size: 14px;
+  background: #16213e;
+  color: #aaa;
+  border: 1px solid #1a4a7a;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.page-btn:hover:not(:disabled) {
+  background: #0f3460;
+  color: #e0e0e0;
+  opacity: 1;
+}
+
+.page-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.page-info {
+  color: #888;
+  font-size: 13px;
+  min-width: 60px;
+  text-align: center;
+}
+
+.pkt-hex-wrap {
+  position: relative;
+}
+
 .pkt-hex {
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
   font-size: 12px;
@@ -472,5 +714,26 @@ button:hover {
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.hex-toggle {
+  display: block;
+  width: 100%;
+  padding: 4px 0;
+  margin-top: 0;
+  background: #0a2a50;
+  color: #5a9ad5;
+  font-size: 11px;
+  font-weight: 600;
+  border: none;
+  border-radius: 0 0 6px 6px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.hex-toggle:hover {
+  background: #0d3260;
+  color: #7ab8ff;
+  opacity: 1;
 }
 </style>

@@ -27,7 +27,6 @@ struct ConnectionKey {
                std::tie(o.srcIP, o.dstIP, o.srcPort, o.dstPort);
     }
 
-    // Return the reverse direction key
     ConnectionKey reverse() const {
         return { dstIP, srcIP, dstPort, srcPort };
     }
@@ -41,23 +40,46 @@ struct TcpSegment {
     uint16_t dstPort;
     const uint8_t* payload;
     int payloadLen;
+    uint32_t seq;
     bool syn;
+    bool ack;
     bool fin;
     bool rst;
+};
+
+// TCP reassembly buffer (per direction)
+// Handles retransmit, out-of-order, and segment replacement.
+// Uses one-segment hold: the newest segment stays pending until the next arrives,
+// allowing a replacement (same seq, longer data) to overwrite before delivery.
+struct TcpReasm {
+    uint32_t nextSeq = 0;
+    bool initialized = false;
+    std::map<uint32_t, std::vector<uint8_t>> staged;
+
+    void init(uint32_t seq) { nextSeq = seq; initialized = true; }
+
+    // Add a TCP segment to staging (replace if same seq and longer)
+    void addSegment(uint32_t seq, const uint8_t* data, int len);
+
+    // Drain in-order bytes from staging.
+    // If holdLast=true, keep the newest segment pending (for replacement protection).
+    std::vector<uint8_t> drain(bool holdLast);
 };
 
 // Session tracks a MapleStory connection (bidirectional)
 class Session {
 public:
-    // Try to detect handshake from first server->client packet
-    // Returns true if handshake was successfully parsed
-    bool tryHandshake(const TcpSegment& seg, double timestamp);
-
-    // Feed data into the appropriate direction stream
+    // Process a TCP segment through reassembly → protocol parsing → decrypt
     // Returns decoded packets (may be 0 or more)
-    std::vector<DecryptedPacket> feedData(const TcpSegment& seg, double timestamp);
+    std::vector<DecryptedPacket> processSegment(const TcpSegment& seg, double timestamp);
 
     bool isInitialized() const { return initialized_; }
+    bool isTerminated() const { return terminated_; }
+    void terminate() { terminated_ = true; }
+
+    // Pre-initialize sequence numbers from SYN/SYN-ACK
+    void initClientSeq(uint32_t seq) { clientReasm_.init(seq); }
+    void initServerSeq(uint32_t seq) { serverReasm_.init(seq); }
 
     // Accessors for handshake info
     uint16_t version() const { return version_; }
@@ -67,12 +89,13 @@ public:
     // The server endpoint (as seen in handshake)
     uint32_t serverIP = 0;
     uint16_t serverPort = 0;
+    uint16_t clientPort = 0;
 
 private:
     static constexpr uint16_t LOGIN_PORT = 8484;
 
     bool initialized_ = false;
-    bool handshakePending_ = true;
+    bool terminated_ = false;
     bool isLoginServer_ = false;
 
     uint16_t version_ = 0;
@@ -81,9 +104,24 @@ private:
     uint8_t sendIV_[4]{};
     uint8_t recvIV_[4]{};
 
-    // outbound = client->server, inbound = server->client
-    std::unique_ptr<MapleStream> outboundStream_;  // client -> server
-    std::unique_ptr<MapleStream> inboundStream_;    // server -> client
+    // TCP reassembly (per direction)
+    TcpReasm serverReasm_;  // server → client (inbound)
+    TcpReasm clientReasm_;  // client → server (outbound)
+
+    // Pending bytes before handshake is detected
+    std::vector<uint8_t> pendingInbound_;   // inbound: for handshake detection
+    std::vector<uint8_t> pendingOutbound_;  // outbound: buffered until handshake completes
+
+    // MapleStory protocol streams (created after handshake)
+    std::unique_ptr<MapleStream> outboundStream_;
+    std::unique_ptr<MapleStream> inboundStream_;
+
+    // Try to detect handshake from accumulated inbound bytes
+    // Returns handshake packet if detected, or nullopt
+    std::optional<DecryptedPacket> tryDetectHandshake(double timestamp);
+
+    // Feed reassembled bytes to MapleStream and read decoded packets
+    std::vector<DecryptedPacket> feedStream(MapleStream* stream, const uint8_t* data, int len, double timestamp);
 };
 
 // Stateful protocol analyzer
@@ -91,15 +129,11 @@ class Protocol {
 public:
     Protocol() = default;
 
-    // Process a raw captured Ethernet frame
-    // Returns 0 or more decoded packets
     std::vector<Packet> process(const RawPacket& raw);
 
-    // Generate hex dump string from binary data
     static std::string toHexDump(const uint8_t* data, size_t len, size_t maxBytes = 128);
 
 private:
-    // Parse TCP segment from Ethernet frame
     static bool parseTcp(const uint8_t* data, int len, TcpSegment& seg);
 
     std::map<ConnectionKey, std::shared_ptr<Session>> sessions_;

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
-#include <iostream>
 #include <openssl/evp.h>
 
 namespace maple {
@@ -38,16 +37,12 @@ void MapleStream::append(const uint8_t* data, int len) {
     cursor_ += len;
 }
 
-static std::string toHexDump(const uint8_t* data, size_t len, size_t maxBytes = 128) {
+static std::string toHexDump(const uint8_t* data, size_t len) {
     std::ostringstream oss;
-    size_t printLen = std::min(len, maxBytes);
-    for (size_t i = 0; i < printLen; i++) {
+    for (size_t i = 0; i < len; i++) {
         oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(data[i]);
-        if (i + 1 < printLen) oss << ' ';
-        if ((i + 1) % 16 == 0 && i + 1 < printLen) oss << '\n';
-    }
-    if (printLen < len) {
-        oss << "\n... (" << (len - printLen) << " more bytes)";
+        if (i + 1 < len) oss << ' ';
+        if ((i + 1) % 16 == 0 && i + 1 < len) oss << '\n';
     }
     return oss.str();
 }
@@ -118,8 +113,6 @@ std::optional<DecryptedPacket> MapleStream::tryRead(double timestamp) {
             pkt.payload[0] | (pkt.payload[1] << 8) |
             (pkt.payload[2] << 16) | (pkt.payload[3] << 24)
         );
-        std::cout << "[MapleStream] Recv OpcodeEncryption packet, bufferSize=" << bufferSize << std::endl;
-
         if (bufferSize > 0 && static_cast<int>(pkt.payload.size()) >= 4 + bufferSize) {
             encryptedOpcodes_ = parseOpcodeEncryption(
                 pkt.payload.data() + 4, static_cast<int>(pkt.payload.size()) - 4, bufferSize);
@@ -190,7 +183,6 @@ std::unordered_map<int, uint16_t> MapleStream::parseOpcodeEncryption(
             uint16_t realOp = static_cast<uint16_t>(index + DYNAMIC_OPCODE_BASE);
 
             if (result.count(encryptedOp)) {
-                std::cout << "[MapleStream] Duplicate opcode 0x" << std::hex << encryptedOp << ", stopping" << std::endl;
                 break;
             }
             result[encryptedOp] = realOp;
@@ -200,7 +192,6 @@ std::unordered_map<int, uint16_t> MapleStream::parseOpcodeEncryption(
         }
     }
 
-    std::cout << "[MapleStream] Loaded " << result.size() << " encrypted opcodes" << std::endl;
     return result;
 }
 
