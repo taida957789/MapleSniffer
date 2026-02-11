@@ -2,6 +2,14 @@
 
 A real-time MapleStory packet sniffer and analyzer with AES decryption, custom parsing scripts, and a modern web UI.
 
+## Screenshots
+
+![Packet capture with byte inspector](screenshots/1.png)
+
+![Script editor](screenshots/2.png)
+
+![Opcode names manager and session export](screenshots/3.png)
+
 ## Features
 
 - **Live Packet Capture** -- npcap-based capture with TCP reassembly, multi-session tracking, and BPF filtering
