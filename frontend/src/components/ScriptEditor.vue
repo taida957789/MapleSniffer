@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { getScript, saveScript as bridgeSaveScript } from '../bridge'
+import { EditorView, basicSetup } from 'codemirror'
+import { keymap } from '@codemirror/view'
+import { indentWithTab } from '@codemirror/commands'
+import { javascript } from '@codemirror/lang-javascript'
+import { oneDark } from '@codemirror/theme-one-dark'
+import { linter, lintGutter } from '@codemirror/lint'
 
 const props = defineProps<{
   visible: boolean
@@ -19,6 +25,66 @@ const code = ref('')
 const saving = ref(false)
 const feedback = ref('')
 const feedbackType = ref<'success' | 'error'>('success')
+const editorEl = ref<HTMLDivElement | null>(null)
+let editorView: EditorView | null = null
+
+const jsLinter = linter((view) => {
+  const doc = view.state.doc.toString()
+  if (!doc.trim()) return []
+  try {
+    new Function('packet', doc)
+    return []
+  } catch (e: any) {
+    // Try to extract line info from error message
+    const match = e.message?.match(/\((\d+):(\d+)\)/)
+    let from = doc.length
+    let to = doc.length
+    if (match) {
+      // SyntaxError line numbers are 2-indexed (wrapper function adds a line)
+      const line = Math.max(1, parseInt(match[1]) - 1)
+      const col = parseInt(match[2])
+      if (line <= view.state.doc.lines) {
+        const lineObj = view.state.doc.line(line)
+        from = Math.min(lineObj.from + col - 1, lineObj.to)
+        to = lineObj.to
+      }
+    }
+    return [{
+      from,
+      to,
+      severity: 'error' as const,
+      message: e.message?.replace(/\s*\(\d+:\d+\)$/, '') || 'Syntax error',
+    }]
+  }
+})
+
+function createEditor(container: HTMLElement, initialDoc: string) {
+  return new EditorView({
+    doc: initialDoc,
+    parent: container,
+    extensions: [
+      basicSetup,
+      keymap.of([indentWithTab]),
+      javascript(),
+      oneDark,
+      jsLinter,
+      lintGutter(),
+      EditorView.theme({
+        '&': { height: '100%' },
+        '.cm-scroller': { overflow: 'auto' },
+        '.cm-content': { fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace", fontSize: '13px' },
+        '.cm-gutters': { background: '#0a2744', borderRight: '1px solid #1a4a7a' },
+        '&.cm-editor': { background: '#0f3460' },
+        '&.cm-focused': { outline: 'none' },
+      }),
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          code.value = update.state.doc.toString()
+        }
+      }),
+    ],
+  })
+}
 
 watch(() => props.visible, async (visible) => {
   if (visible) {
@@ -26,11 +92,20 @@ watch(() => props.visible, async (visible) => {
     try {
       code.value = await getScript(props.direction, props.opcode, props.locale, props.version)
       if (!code.value) {
-        // Provide a template for new scripts
         code.value = `// Parse opcode 0x${props.opcode.toString(16).toUpperCase().padStart(4, '0')} (${props.direction})\n// Available methods:\n//   packet.readByte(name), packet.readShort(name)\n//   packet.readInt(name), packet.readLong(name)\n//   packet.readString(name, size), packet.readMapleString(name)\n//   packet.readBytes(name, len), packet.readFileTime(name)\n//   packet.readObject(name, fn), packet.readArray(name, count|null, fn)\n//   packet.skip(name, len), packet.remaining()\n\n`
       }
     } catch {
       code.value = ''
+    }
+    // Wait for DOM to render the container div
+    await new Promise(r => setTimeout(r, 0))
+    if (editorEl.value) {
+      editorView = createEditor(editorEl.value, code.value)
+    }
+  } else {
+    if (editorView) {
+      editorView.destroy()
+      editorView = null
     }
   }
 })
@@ -38,6 +113,17 @@ watch(() => props.visible, async (visible) => {
 async function save() {
   saving.value = true
   feedback.value = ''
+
+  // Syntax check before saving
+  try {
+    new Function('packet', code.value)
+  } catch (e: any) {
+    feedback.value = `Syntax error: ${e.message}`
+    feedbackType.value = 'error'
+    saving.value = false
+    return
+  }
+
   try {
     const ok = await bridgeSaveScript(props.direction, props.opcode, code.value, props.locale, props.version)
     if (ok) {
@@ -67,12 +153,7 @@ function formatOpcodeHex(op: number): string {
         <span class="editor-title">Script: {{ direction }}_{{ formatOpcodeHex(opcode) }}.js</span>
         <button class="editor-close" @click="emit('close')">&times;</button>
       </div>
-      <textarea
-        v-model="code"
-        class="editor-textarea"
-        spellcheck="false"
-        placeholder="// Write your packet parsing script here..."
-      ></textarea>
+      <div ref="editorEl" class="editor-container"></div>
       <div class="editor-footer">
         <span v-if="feedback" class="editor-feedback" :class="feedbackType">{{ feedback }}</span>
         <div class="editor-actions">
@@ -138,19 +219,15 @@ function formatOpcodeHex(op: number): string {
   opacity: 1;
 }
 
-.editor-textarea {
+.editor-container {
   flex: 1;
   min-height: 350px;
-  padding: 16px 20px;
-  background: #0f3460;
-  color: #e0e0e0;
-  border: none;
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  resize: none;
-  outline: none;
-  tab-size: 2;
+  overflow: hidden;
+  border-radius: 0;
+}
+
+.editor-container :deep(.cm-editor) {
+  height: 100%;
 }
 
 .editor-footer {

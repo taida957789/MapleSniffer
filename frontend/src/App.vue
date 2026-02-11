@@ -276,6 +276,7 @@ function openEditor() {
 }
 
 function onScriptSaved() {
+  editorVisible.value = false
   if (selectedPacket.value) {
     const key = scriptCacheKey(selectedPacket.value)
     scriptCache.value.delete(key)
