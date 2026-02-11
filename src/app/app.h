@@ -36,6 +36,9 @@ private:
     std::string getOpcodeNames(int locale, int version);
     bool saveOpcodeNames(int locale, int version, const std::string& namesJson);
 
+    // Opcode encryption
+    std::string decryptOpcodes(const std::string& hexPayload, const std::string& desKey);
+
     Capture& capture_;
     std::shared_ptr<saucer::window> window_;
     std::optional<saucer::smartview> webview_;
@@ -54,6 +57,7 @@ private:
         uint16_t version;
         std::string subVersion;
         uint16_t serverPort;
+        double timestamp;
     };
     std::vector<SessionMeta> sessions_;
 };

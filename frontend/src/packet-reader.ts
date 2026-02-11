@@ -89,7 +89,17 @@ export class PacketReader {
     return value
   }
 
-  readString(name: string): string {
+  readString(name: string, size: number): string {
+    this.ensureBytes(size)
+    const offset = this.pos
+    const bytes = this.data.slice(this.pos, this.pos + size)
+    const value = new TextDecoder().decode(bytes)
+    this.pos += size
+    this.addField({ name, type: 'string', value, offset, length: size })
+    return value
+  }
+
+  readMapleString(name: string): string {
     this.ensureBytes(2)
     const offset = this.pos
     const len = this.data[this.pos] | (this.data[this.pos + 1] << 8)
@@ -100,6 +110,36 @@ export class PacketReader {
     this.pos += len
     this.addField({ name, type: 'string', value, offset, length: 2 + len })
     return value
+  }
+
+  readFileTime(name: string): string {
+    this.ensureBytes(8)
+    const offset = this.pos
+    // Read as two 32-bit little-endian ints (low, high)
+    const low = (this.data[this.pos]
+      | (this.data[this.pos + 1] << 8)
+      | (this.data[this.pos + 2] << 16)
+      | (this.data[this.pos + 3] << 24)) >>> 0
+    const high = (this.data[this.pos + 4]
+      | (this.data[this.pos + 5] << 8)
+      | (this.data[this.pos + 6] << 16)
+      | (this.data[this.pos + 7] << 24)) >>> 0
+    this.pos += 8
+    // Combine into 64-bit value: filetime = low + (high << 32)
+    const filetime = BigInt(low) | (BigInt(high) << 32n)
+    // Convert Windows FILETIME (100ns since 1601-01-01) to epoch millis
+    const FILETIME_EPOCH_DIFF = 11644473600000n
+    const FILETIME_ONE_MILLISECOND = 10000n
+    const epochMillis = Number(filetime / FILETIME_ONE_MILLISECOND - FILETIME_EPOCH_DIFF)
+    let display: string
+    if (filetime === 0n || epochMillis < -30610224000000 || epochMillis > 32503680000000) {
+      // Special/out-of-range values
+      display = filetime === 0n ? '(zero)' : `(special: 0x${filetime.toString(16).toUpperCase()})`
+    } else {
+      display = new Date(epochMillis).toISOString().replace('T', ' ').replace(/\.000Z$/, '')
+    }
+    this.addField({ name, type: 'string', value: display, offset, length: 8 })
+    return display
   }
 
   readBytes(name: string, len: number): Uint8Array {

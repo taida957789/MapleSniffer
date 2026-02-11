@@ -12,6 +12,7 @@ export interface PacketInfo {
   outbound: boolean
   opcode: string
   opcodeRaw: number
+  encryptedOpcodeRaw?: number
   isHandshake: boolean
   decrypted: boolean
   sessionId: number
@@ -33,6 +34,7 @@ export interface SessionMeta {
   version: number
   subVersion: string
   serverPort: number
+  timestamp: number
 }
 
 export interface ScriptEntry {
@@ -112,6 +114,11 @@ export interface OpcodeNameMap {
 export async function getOpcodeNames(locale: number, version: number): Promise<OpcodeNameMap> {
   if (isSaucer) return JSON.parse(await (window as any).saucer.exposed.getOpcodeNames(locale, version))
   return (await fetch(`/api/opcode-names?locale=${locale}&version=${version}`)).json()
+}
+
+export async function decryptOpcodes(hexPayload: string, desKey: string): Promise<Record<string, number>> {
+  if (isSaucer) return JSON.parse(await (window as any).saucer.exposed.decryptOpcodes(hexPayload, desKey))
+  return {}
 }
 
 export async function saveOpcodeNames(locale: number, version: number, names: OpcodeNameMap): Promise<boolean> {

@@ -1,6 +1,7 @@
 #include "app.h"
 #include <nlohmann/json.hpp>
 #include <saucer/embedded/all.hpp>
+#include <saucer/icon.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -29,7 +30,71 @@ void App::setup(saucer::application* app) {
     webview_.emplace(saucer::smartview::create({.window = window_}).value());
 
     window_->set_title("MapleSniffer");
-    window_->set_size({1024, 900});
+    window_->set_size({1280, 1024});
+
+    // Set window icon from embedded resource (app.rc: IDI_ICON1)
+    {
+        HMODULE hModule = GetModuleHandleW(nullptr);
+        HRSRC hRes = FindResourceW(hModule, MAKEINTRESOURCEW(1), RT_GROUP_ICON);
+        if (!hRes) hRes = FindResourceW(hModule, L"IDI_ICON1", RT_GROUP_ICON);
+
+        // Fallback: load icon.ico from disk next to exe
+        auto tryFile = [&]() {
+            wchar_t exeBuf[MAX_PATH];
+            GetModuleFileNameW(nullptr, exeBuf, MAX_PATH);
+            auto icoPath = fs::path(exeBuf).parent_path() / "icon.ico";
+            auto ico = saucer::icon::from(icoPath);
+            if (ico.has_value()) window_->set_icon(ico.value());
+        };
+
+        if (hRes) {
+            HGLOBAL hData = LoadResource(hModule, hRes);
+            if (hData) {
+                auto* grp = static_cast<const uint8_t*>(LockResource(hData));
+                DWORD grpSize = SizeofResource(hModule, hRes);
+                // Find the best icon entry in the group and load the RT_ICON resource
+                // Group header: reserved(2) + type(2) + count(2), then entries of 14 bytes each
+                if (grpSize >= 6) {
+                    uint16_t count = *reinterpret_cast<const uint16_t*>(grp + 4);
+                    // Use the last entry (largest icon, typically 256x256)
+                    if (count > 0 && grpSize >= 6u + count * 14u) {
+                        uint16_t iconId = *reinterpret_cast<const uint16_t*>(grp + 6 + (count - 1) * 14 + 12);
+                        HRSRC hIcon = FindResourceW(hModule, MAKEINTRESOURCEW(iconId), RT_ICON);
+                        if (hIcon) {
+                            HGLOBAL hIconData = LoadResource(hModule, hIcon);
+                            DWORD iconSize = SizeofResource(hModule, hIcon);
+                            if (hIconData && iconSize > 0) {
+                                auto* iconBytes = static_cast<const uint8_t*>(LockResource(hIconData));
+                                // Build a single-entry ICO file in memory
+                                std::vector<uint8_t> ico(6 + 16 + iconSize);
+                                // Header: reserved=0, type=1, count=1
+                                ico[2] = 1; // type
+                                ico[4] = 1; // count
+                                // Copy the GRPICONDIRENTRY (first 12 bytes of the group entry)
+                                std::memcpy(ico.data() + 6, grp + 6 + (count - 1) * 14, 12);
+                                // Fix size field (offset 8 in entry = bytes 6+8)
+                                *reinterpret_cast<uint32_t*>(ico.data() + 6 + 8) = iconSize;
+                                // Offset to image data (6 header + 16 entry)
+                                *reinterpret_cast<uint32_t*>(ico.data() + 6 + 12) = 6 + 16;
+                                // Append raw icon image
+                                std::memcpy(ico.data() + 6 + 16, iconBytes, iconSize);
+
+                                auto stash = saucer::stash::from(std::move(ico));
+                                auto icon = saucer::icon::from(stash);
+                                if (icon.has_value()) {
+                                    window_->set_icon(icon.value());
+                                } else {
+                                    tryFile();
+                                }
+                            } else { tryFile(); }
+                        } else { tryFile(); }
+                    } else { tryFile(); }
+                } else { tryFile(); }
+            } else { tryFile(); }
+        } else {
+            tryFile();
+        }
+    }
 
     // Expose C++ functions to JavaScript
     webview_->expose("getStatus", [this]() { return getStatus(); });
@@ -58,6 +123,11 @@ void App::setup(saucer::application* app) {
         return saveOpcodeNames(locale, version, namesJson);
     });
 
+    // Opcode encryption
+    webview_->expose("decryptOpcodes", [this](const std::string& hexPayload, const std::string& desKey) {
+        return decryptOpcodes(hexPayload, desKey);
+    });
+
     // Embed frontend and serve
     webview_->embed(saucer::embedded::all());
     webview_->serve("/index.html");
@@ -81,7 +151,8 @@ void App::addPackets(const std::vector<Packet>& pkts) {
                     pkt.locale,
                     pkt.version,
                     pkt.subVersionStr,
-                    pkt.serverPort
+                    pkt.serverPort,
+                    pkt.timestamp
                 });
             }
         }
@@ -248,7 +319,8 @@ std::string App::getSessions() {
             {"locale", s.locale},
             {"version", s.version},
             {"subVersion", s.subVersion},
-            {"serverPort", s.serverPort}
+            {"serverPort", s.serverPort},
+            {"timestamp", s.timestamp}
         });
     }
     return j.dump();
@@ -272,6 +344,40 @@ bool App::saveOpcodeNames(int locale, int version, const std::string& namesJson)
     if (!ofs.is_open()) return false;
     ofs << namesJson;
     return ofs.good();
+}
+
+std::string App::decryptOpcodes(const std::string& hexPayload, const std::string& desKey) {
+    // Parse space-separated hex string to bytes
+    std::vector<uint8_t> bytes;
+    std::istringstream iss(hexPayload);
+    std::string hexByte;
+    while (iss >> hexByte) {
+        if (hexByte.size() == 2) {
+            try {
+                bytes.push_back(static_cast<uint8_t>(std::stoi(hexByte, nullptr, 16)));
+            } catch (...) {
+                return "{}";
+            }
+        }
+    }
+
+    if (bytes.size() < 4) return "{}";
+
+    int32_t bufferSize = static_cast<int32_t>(
+        bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24));
+
+    if (bufferSize <= 0 || static_cast<int>(bytes.size()) < 4 + bufferSize) return "{}";
+
+    auto mapping = MapleStream::parseOpcodeEncryption(
+        bytes.data() + 4, static_cast<int>(bytes.size()) - 4, bufferSize, desKey);
+
+    if (mapping.empty()) return "{}";
+
+    json j;
+    for (const auto& [enc, real] : mapping) {
+        j[std::to_string(enc)] = real;
+    }
+    return j.dump();
 }
 
 } // namespace maple

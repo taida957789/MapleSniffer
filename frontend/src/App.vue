@@ -10,6 +10,7 @@ import {
   getSessions as bridgeGetSessions,
   getOpcodeNames as bridgeGetOpcodeNames,
   saveOpcodeNames as bridgeSaveOpcodeNames,
+  decryptOpcodes as bridgeDecryptOpcodes,
   type NetworkInterface,
   type PacketInfo,
   type Status,
@@ -21,6 +22,7 @@ import type { ParsedField } from './packet-reader'
 import TreeView from './components/TreeView.vue'
 import ScriptEditor from './components/ScriptEditor.vue'
 import OpcodeImporter from './components/OpcodeImporter.vue'
+import ByteInspector from './components/ByteInspector.vue'
 
 const interfaces = ref<NetworkInterface[]>([])
 const selectedInterface = ref('')
@@ -29,6 +31,7 @@ const portMax = ref(9999)
 const status = ref<Status>({ capturing: false, packetCount: 0, interface: '', filter: '' })
 const packets = ref<PacketInfo[]>([])
 const error = ref('')
+const successMsg = ref('')
 const activeTab = ref<'all' | 'in' | 'out'>('all')
 const sortOrder = ref<'desc' | 'asc'>('desc')
 const opcodeFilter = ref('')
@@ -39,6 +42,13 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 // Multi-session state
 const sessions = ref<SessionMeta[]>([])
 const activeSessionId = ref<number | null>(null)
+
+// Hex highlight state
+const highlightRange = ref<{ offset: number; length: number } | null>(null)
+
+// User byte selection state (for byte inspector)
+const userSelection = ref<{ start: number; end: number } | null>(null)
+const inspectorPos = ref<{ x: number; y: number }>({ x: 0, y: 0 })
 
 // Script system state
 const selectedPacket = ref<PacketInfo | null>(null)
@@ -51,6 +61,21 @@ const opcodeNamesCache = ref<Map<string, OpcodeNameMap>>(new Map())
 const importerVisible = ref(false)
 const opcodeNameInput = ref('')
 
+// Context menu state
+const contextMenu = ref<{ x: number; y: number; pkt: PacketInfo } | null>(null)
+
+// Settings state
+const settingsVisible = ref(false)
+const desKeyInput = ref(localStorage.getItem('maple_des_key') || 'BrN=r54jQp2@yP6G')
+
+function saveDesKey() {
+  localStorage.setItem('maple_des_key', desKeyInput.value)
+}
+
+function formatOpcode(raw: number): string {
+  return '0x' + raw.toString(16).toUpperCase().padStart(4, '0')
+}
+
 function selectPacket(pkt: PacketInfo) {
   if (selectedPacket.value?.index === pkt.index) {
     selectedPacket.value = null
@@ -62,6 +87,62 @@ function selectPacket(pkt: PacketInfo) {
 
 function getSessionForPacket(pkt: PacketInfo): SessionMeta | undefined {
   return sessions.value.find(s => s.id === pkt.sessionId)
+}
+
+// --- Context menu ---
+
+function onPacketContextMenu(pkt: PacketInfo, event: MouseEvent) {
+  event.preventDefault()
+  contextMenu.value = { x: event.clientX, y: event.clientY, pkt }
+}
+
+function closeContextMenu() {
+  contextMenu.value = null
+}
+
+async function decryptOpcodeEncryption() {
+  if (!contextMenu.value) return
+  const pkt = contextMenu.value.pkt
+  closeContextMenu()
+
+  if (pkt.isHandshake || !pkt.hexDump) {
+    error.value = 'This packet has no payload to decrypt'
+    return
+  }
+
+  try {
+    const mapping = await bridgeDecryptOpcodes(pkt.hexDump, desKeyInput.value)
+    const entries = Object.entries(mapping)
+    if (entries.length === 0) {
+      error.value = 'Failed to decrypt opcode encryption: invalid format or no opcodes found'
+      return
+    }
+
+    // Apply mapping to all outbound packets in the same session
+    let remapped = 0
+    for (const p of packets.value) {
+      if (p.sessionId !== pkt.sessionId || !p.outbound || p.isHandshake) continue
+      const realOp = mapping[String(p.opcodeRaw)]
+      if (realOp !== undefined) {
+        p.encryptedOpcodeRaw = p.opcodeRaw
+        p.opcodeRaw = realOp
+        p.opcode = formatOpcode(realOp)
+        remapped++
+      }
+    }
+
+    error.value = ''
+    successMsg.value = `Opcode encryption applied: ${entries.length} mappings, ${remapped} packets remapped`
+    setTimeout(() => { successMsg.value = '' }, 3000)
+  } catch (e: any) {
+    error.value = 'Decrypt failed: ' + e.message
+  }
+}
+
+// Close context menu on click anywhere
+function onDocumentClick() {
+  if (contextMenu.value) closeContextMenu()
+  userSelection.value = null
 }
 
 // --- Opcode names ---
@@ -97,7 +178,11 @@ function getOpcodeName(pkt: PacketInfo): string | null {
 function displayOpcode(pkt: PacketInfo): string {
   if (pkt.isHandshake) return 'Handshake'
   const name = getOpcodeName(pkt)
-  return name ? `${name}(${pkt.opcode})` : pkt.opcode
+  const base = name ? `${name}(${pkt.opcode})` : pkt.opcode
+  if (pkt.encryptedOpcodeRaw !== undefined) {
+    return `${base} [enc:${formatOpcode(pkt.encryptedOpcodeRaw)}]`
+  }
+  return base
 }
 
 const currentOpcodeName = computed(() => {
@@ -159,6 +244,8 @@ function scriptCacheKey(pkt: PacketInfo): string {
 
 watch(selectedPacket, async (pkt) => {
   parseResult.value = null
+  highlightRange.value = null
+  userSelection.value = null
   if (!pkt || pkt.isHandshake) return
 
   const session = getSessionForPacket(pkt)
@@ -197,6 +284,150 @@ function onScriptSaved() {
     setTimeout(() => { selectedPacket.value = pkt }, 0)
   }
 }
+
+// --- Export / Import ---
+
+function downloadJson(data: any, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function exportSession() {
+  if (activeSessionId.value === null) return
+  const session = sessions.value.find(s => s.id === activeSessionId.value)
+  if (!session) return
+
+  const sessionPackets = packets.value.filter(p => p.sessionId === activeSessionId.value)
+  const key = opcodeNamesCacheKey(session.locale, session.version)
+  const names = opcodeNamesCache.value.get(key) ?? { send: {}, recv: {} }
+
+  const time = session.timestamp
+    ? new Date(session.timestamp * 1000).toTimeString().slice(0, 8).replace(/:/g, '')
+    : 'unknown'
+  const filename = `session_v${session.version}_${session.serverPort}_${time}.json`
+
+  downloadJson({ session, opcodeNames: names, packets: sessionPackets }, filename)
+}
+
+const fileInput = ref<HTMLInputElement | null>(null)
+
+function triggerImport() {
+  fileInput.value?.click()
+}
+
+async function importSession(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  input.value = ''
+
+  try {
+    const text = await file.text()
+    const data = JSON.parse(text)
+
+    if (!data.session || !Array.isArray(data.packets)) {
+      error.value = 'Invalid session file format'
+      return
+    }
+
+    // Assign new session ID
+    const maxId = sessions.value.length > 0
+      ? Math.max(...sessions.value.map(s => s.id))
+      : 0
+    const newId = maxId + 1
+
+    const imported: SessionMeta = {
+      id: newId,
+      locale: data.session.locale ?? 0,
+      version: data.session.version ?? 0,
+      subVersion: data.session.subVersion ?? '',
+      serverPort: data.session.serverPort ?? 0,
+      timestamp: data.session.timestamp ?? 0
+    }
+
+    sessions.value.push(imported)
+
+    // Remap packets to new session ID
+    const importedPackets: PacketInfo[] = data.packets.map((p: any) => ({
+      ...p,
+      sessionId: newId
+    }))
+    packets.value.push(...importedPackets)
+
+    // Load opcode names
+    if (data.opcodeNames) {
+      const key = opcodeNamesCacheKey(imported.locale, imported.version)
+      const names = data.opcodeNames as OpcodeNameMap
+      if (!names.send) names.send = {}
+      if (!names.recv) names.recv = {}
+      opcodeNamesCache.value.set(key, names)
+      opcodeNamesCache.value = new Map(opcodeNamesCache.value)
+    }
+
+    // Switch to imported session
+    activeSessionId.value = newId
+    currentPage.value = 1
+    error.value = ''
+  } catch (e: any) {
+    error.value = 'Failed to import session: ' + e.message
+  }
+}
+
+// --- Hex highlight ---
+
+function onFieldSelect(offset: number, length: number) {
+  highlightRange.value = { offset, length }
+  userSelection.value = null
+}
+
+const hexBytes = computed((): string[] => {
+  if (!selectedPacket.value) return []
+  return selectedPacket.value.hexDump.split(/\s+/).filter(s => /^[0-9a-fA-F]{2}$/i.test(s))
+})
+
+const hexRows = computed(() => {
+  const bytes = hexBytes.value
+  const rows: string[][] = []
+  for (let i = 0; i < bytes.length; i += 16) {
+    rows.push(bytes.slice(i, i + 16))
+  }
+  return rows
+})
+
+function isHighlighted(byteIndex: number): boolean {
+  if (!highlightRange.value) return false
+  const { offset, length } = highlightRange.value
+  return byteIndex >= offset && byteIndex < offset + length
+}
+
+function isUserSelected(byteIndex: number): boolean {
+  if (!userSelection.value) return false
+  return byteIndex >= userSelection.value.start && byteIndex <= userSelection.value.end
+}
+
+function onByteClick(byteIndex: number, event: MouseEvent) {
+  if (event.shiftKey && userSelection.value) {
+    userSelection.value = {
+      start: Math.min(userSelection.value.start, byteIndex),
+      end: Math.max(userSelection.value.start, byteIndex)
+    }
+  } else {
+    userSelection.value = { start: byteIndex, end: byteIndex }
+  }
+  inspectorPos.value = { x: event.clientX, y: event.clientY }
+  highlightRange.value = null
+}
+
+const selectedBytes = computed((): number[] => {
+  if (!userSelection.value || hexBytes.value.length === 0) return []
+  const { start, end } = userSelection.value
+  return hexBytes.value.slice(start, end + 1).map(h => parseInt(h, 16))
+})
 
 // --- UI helpers ---
 
@@ -401,7 +632,8 @@ function formatTimestamp(ts: number): string {
 }
 
 function sessionLabel(s: SessionMeta): string {
-  return `v${s.version} :${s.serverPort}`
+  const time = s.timestamp ? formatTimestamp(s.timestamp) + ' ' : ''
+  return `${time}v${s.version} :${s.serverPort}`
 }
 
 const selectedPacketSession = computed(() => {
@@ -428,6 +660,7 @@ const handshakeFields = computed((): ParsedField[] => {
 })
 
 onMounted(async () => {
+  document.addEventListener('click', onDocumentClick)
   await loadInterfaces()
   await loadStatus()
   if (status.value.capturing) {
@@ -448,6 +681,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('click', onDocumentClick)
   if (pollTimer) clearInterval(pollTimer)
 })
 </script>
@@ -463,9 +697,30 @@ onUnmounted(() => {
         {{ sessionLabel(sessions.find(s => s.id === activeSessionId)!) }}
         locale={{ sessions.find(s => s.id === activeSessionId)!.locale }}
       </span>
+      <button class="btn-settings" @click="settingsVisible = !settingsVisible" :class="{ active: settingsVisible }">
+        Settings
+      </button>
     </header>
 
+    <!-- Settings Panel -->
+    <section v-if="settingsVisible" class="settings-panel">
+      <div class="settings-row">
+        <label class="settings-label">3DES Key (16 chars)</label>
+        <input
+          v-model="desKeyInput"
+          class="settings-input"
+          maxlength="16"
+          placeholder="BrN=r54jQp2@yP6G"
+          @change="saveDesKey"
+        />
+        <span class="settings-hint" :class="{ 'settings-warn': desKeyInput.length !== 16 }">
+          {{ desKeyInput.length }}/16
+        </span>
+      </div>
+    </section>
+
     <div v-if="error" class="error">{{ error }}</div>
+    <div v-if="successMsg" class="success">{{ successMsg }}</div>
 
     <section class="controls">
       <div class="field">
@@ -523,6 +778,22 @@ onUnmounted(() => {
         @click="switchSession(s.id)"
       >{{ sessionLabel(s) }}</button>
       <button
+        v-if="activeSessionId !== null"
+        class="btn-session-action"
+        @click="exportSession"
+      >Export</button>
+      <button
+        class="btn-session-action"
+        @click="triggerImport"
+      >Import</button>
+      <input
+        ref="fileInput"
+        type="file"
+        accept=".json"
+        style="display: none"
+        @change="importSession"
+      />
+      <button
         v-if="activeImporterSession"
         class="btn-import-opcodes"
         @click="importerVisible = true"
@@ -578,6 +849,7 @@ onUnmounted(() => {
           class="packet-item"
           :class="{ handshake: pkt.isHandshake, selected: selectedPacket?.index === pkt.index }"
           @click="selectPacket(pkt)"
+          @contextmenu="onPacketContextMenu(pkt, $event)"
         >
           <div class="packet-header">
             <span class="pkt-index">#{{ pkt.index }}</span>
@@ -633,7 +905,21 @@ onUnmounted(() => {
       <div class="detail-body">
         <div class="detail-hex">
           <div class="detail-section-title">Hex Dump</div>
-          <pre class="pkt-hex">{{ selectedPacket.hexDump }}</pre>
+          <div class="pkt-hex hex-interactive">
+            <div v-for="(row, rowIdx) in hexRows" :key="rowIdx" class="hex-row">
+              <span class="hex-addr">{{ (rowIdx * 16).toString(16).padStart(4, '0').toUpperCase() }}</span>
+              <span
+                v-for="(byte, colIdx) in row"
+                :key="colIdx"
+                class="hex-byte"
+                :class="{
+                  'hex-hl': isHighlighted(rowIdx * 16 + colIdx),
+                  'hex-sel': isUserSelected(rowIdx * 16 + colIdx)
+                }"
+                @click.stop="onByteClick(rowIdx * 16 + colIdx, $event)"
+              >{{ byte }}</span>
+            </div>
+          </div>
         </div>
         <div class="detail-parsed">
           <div class="detail-section-header">
@@ -647,7 +933,12 @@ onUnmounted(() => {
             </button>
           </div>
           <div v-if="selectedPacket.isHandshake" class="parsed-content">
-            <TreeView :fields="handshakeFields" />
+            <TreeView
+              :fields="handshakeFields"
+              :selected-offset="highlightRange?.offset ?? -1"
+              :selected-length="highlightRange?.length ?? 0"
+              @select="onFieldSelect"
+            />
           </div>
           <div v-else-if="!selectedPacketSession" class="parsed-placeholder">
             Waiting for handshake...
@@ -656,7 +947,12 @@ onUnmounted(() => {
             No script for this opcode
           </div>
           <div v-else class="parsed-content">
-            <TreeView :fields="parseResult.fields" />
+            <TreeView
+              :fields="parseResult.fields"
+              :selected-offset="highlightRange?.offset ?? -1"
+              :selected-length="highlightRange?.length ?? 0"
+              @select="onFieldSelect"
+            />
             <div v-if="!parseResult.success" class="parse-error">
               Error: {{ parseResult.error }}
             </div>
@@ -689,6 +985,32 @@ onUnmounted(() => {
       @close="importerVisible = false"
       @imported="onOpcodesImported"
     />
+
+    <!-- Context Menu -->
+    <Teleport to="body">
+      <div
+        v-if="contextMenu"
+        class="context-menu"
+        :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
+        @click.stop
+      >
+        <button class="ctx-item" @click="decryptOpcodeEncryption">
+          Decrypt Opcode Encryption
+        </button>
+      </div>
+    </Teleport>
+
+    <!-- Byte Inspector Popup -->
+    <Teleport to="body">
+      <div
+        v-if="userSelection && selectedBytes.length > 0"
+        class="inspector-popup"
+        :style="{ left: inspectorPos.x + 'px', top: inspectorPos.y + 'px' }"
+        @click.stop
+      >
+        <ByteInspector :bytes="selectedBytes" :visible="true" />
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -748,6 +1070,15 @@ header h1 {
 .error {
   background: #4a1525;
   color: #ff6b6b;
+  padding: 10px 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.success {
+  background: #1b4332;
+  color: #60d394;
   padding: 10px 16px;
   border-radius: 8px;
   margin-bottom: 16px;
@@ -875,6 +1206,24 @@ button:hover {
   background: #2a2a1e;
   color: #f0c040;
   border-color: #5a4a1a;
+}
+
+.btn-session-action {
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #0f3460;
+  color: #60d394;
+  border: 1px solid #1a4a7a;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-left: 4px;
+}
+
+.btn-session-action:hover {
+  background: #1a4a7a;
+  color: #e0e0e0;
+  opacity: 1;
 }
 
 .btn-import-opcodes {
@@ -1121,6 +1470,45 @@ button:hover {
   word-break: break-all;
 }
 
+.hex-interactive {
+  white-space: normal;
+  word-break: normal;
+}
+
+.hex-row {
+  display: flex;
+  gap: 0;
+  line-height: 1.7;
+}
+
+.hex-addr {
+  color: #555;
+  margin-right: 10px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.hex-byte {
+  padding: 0 2.5px;
+  border-radius: 2px;
+  transition: background 0.1s;
+  cursor: pointer;
+}
+
+.hex-byte:hover {
+  background: #1a4a7a;
+}
+
+.hex-byte.hex-hl {
+  background: #e6a817;
+  color: #1a1a2e;
+}
+
+.hex-byte.hex-sel {
+  background: #1a8a8a;
+  color: #e0f0f0;
+}
+
 /* Detail Panel */
 .detail-panel {
   margin-top: 16px;
@@ -1287,5 +1675,118 @@ button:hover {
   border-radius: 6px;
   font-size: 12px;
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+}
+
+/* Context Menu */
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  background: #1a2a4e;
+  border: 1px solid #1a4a7a;
+  border-radius: 8px;
+  padding: 4px 0;
+  min-width: 200px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.ctx-item:hover {
+  background: #0f3460;
+  opacity: 1;
+}
+
+/* Byte Inspector Popup */
+.inspector-popup {
+  position: fixed;
+  z-index: 9998;
+  transform: translate(12px, 12px);
+  max-width: 420px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+/* Settings */
+.btn-settings {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #16213e;
+  color: #888;
+  border: 1px solid #1a4a7a;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.btn-settings:hover {
+  color: #e0e0e0;
+  opacity: 1;
+}
+
+.btn-settings.active {
+  background: #0f3460;
+  color: #7ab8ff;
+  border-color: #2a4a6a;
+}
+
+.settings-panel {
+  background: #16213e;
+  padding: 12px 20px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  border: 1px solid #1a4a7a;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #888;
+  white-space: nowrap;
+}
+
+.settings-input {
+  flex: 1;
+  max-width: 280px;
+  padding: 5px 10px;
+  background: #0f3460;
+  border: 1px solid #1a4a7a;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  outline: none;
+}
+
+.settings-input:focus {
+  border-color: #60d394;
+}
+
+.settings-hint {
+  font-size: 11px;
+  color: #60d394;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+}
+
+.settings-hint.settings-warn {
+  color: #ff6b6b;
 }
 </style>

@@ -46,8 +46,10 @@ public:
 
     // Parse opcode encryption packet (inbound opcode 0x46)
     // Returns mapping: encrypted_opcode -> real_opcode
+    // key: 16-byte 3DES key string (empty = use default)
     static std::unordered_map<int, uint16_t> parseOpcodeEncryption(
-        const uint8_t* data, int dataLen, int bufferSize);
+        const uint8_t* data, int dataLen, int bufferSize,
+        const std::string& key = "");
 
 private:
     bool outbound_;

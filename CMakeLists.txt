@@ -50,7 +50,7 @@ set(SOURCES
     src/app/app.cpp
 )
 
-add_executable(MapleSniffer WIN32 ${SOURCES})
+add_executable(MapleSniffer WIN32 ${SOURCES} app.rc)
 
 # --- Embed frontend into binary (must come after add_executable) ---
 saucer_embed("frontend/dist" TARGET MapleSniffer)

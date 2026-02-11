@@ -139,13 +139,15 @@ std::optional<DecryptedPacket> MapleStream::tryRead(double timestamp) {
 }
 
 std::unordered_map<int, uint16_t> MapleStream::parseOpcodeEncryption(
-    const uint8_t* data, int dataLen, int bufferSize)
+    const uint8_t* data, int dataLen, int bufferSize,
+    const std::string& key)
 {
     std::unordered_map<int, uint16_t> result;
 
     // 3DES-ECB decrypt
-    // Key: "BrN=r54jQp2@yP6G" (16 bytes) -> expand to 24 bytes (first 16 + first 8)
-    const char* keyStr = "BrN=r54jQp2@yP6G";
+    // Key: 16 bytes -> expand to 24 bytes (first 16 + first 8)
+    static const char* defaultKey = "BrN=r54jQp2@yP6G";
+    const char* keyStr = (key.size() == 16) ? key.c_str() : defaultKey;
     uint8_t desKey[24];
     std::memcpy(desKey, keyStr, 16);
     std::memcpy(desKey + 16, keyStr, 8);

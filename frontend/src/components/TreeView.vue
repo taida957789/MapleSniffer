@@ -5,6 +5,12 @@ import type { ParsedField } from '../packet-reader'
 defineProps<{
   fields: ParsedField[]
   depth?: number
+  selectedOffset?: number
+  selectedLength?: number
+}>()
+
+const emit = defineEmits<{
+  select: [offset: number, length: number]
 }>()
 
 const collapsed = ref<Set<string>>(new Set())
@@ -33,6 +39,11 @@ function formatValue(field: ParsedField): string {
 function fieldKey(field: ParsedField, index: number, depth: number): string {
   return `${depth}-${index}-${field.offset}`
 }
+
+function onRowClick(field: ParsedField, key: string) {
+  emit('select', field.offset, field.length)
+  if (field.children) toggleKey(key)
+}
 </script>
 
 <template>
@@ -44,8 +55,9 @@ function fieldKey(field: ParsedField, index: number, depth: number): string {
     >
       <div
         class="tree-row"
+        :class="{ selected: field.offset === selectedOffset && field.length === selectedLength }"
         :style="{ paddingLeft: ((depth ?? 0) * 16 + 4) + 'px' }"
-        @click="field.children ? toggleKey(fieldKey(field, i, depth ?? 0)) : undefined"
+        @click="onRowClick(field, fieldKey(field, i, depth ?? 0))"
       >
         <span v-if="field.children" class="tree-toggle">
           {{ isCollapsed(fieldKey(field, i, depth ?? 0)) ? '&#9654;' : '&#9660;' }}
@@ -60,6 +72,9 @@ function fieldKey(field: ParsedField, index: number, depth: number): string {
         v-if="field.children && !isCollapsed(fieldKey(field, i, depth ?? 0))"
         :fields="field.children"
         :depth="(depth ?? 0) + 1"
+        :selected-offset="selectedOffset"
+        :selected-length="selectedLength"
+        @select="(offset: number, length: number) => emit('select', offset, length)"
       />
     </div>
   </div>
@@ -76,13 +91,17 @@ function fieldKey(field: ParsedField, index: number, depth: number): string {
   display: flex;
   align-items: baseline;
   gap: 4px;
-  cursor: default;
+  cursor: pointer;
   border-radius: 3px;
   padding-right: 8px;
 }
 
 .tree-row:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+
+.tree-row.selected {
+  background: rgba(58, 106, 154, 0.3);
 }
 
 .tree-toggle {

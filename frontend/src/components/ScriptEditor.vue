@@ -27,7 +27,7 @@ watch(() => props.visible, async (visible) => {
       code.value = await getScript(props.direction, props.opcode, props.locale, props.version)
       if (!code.value) {
         // Provide a template for new scripts
-        code.value = `// Parse opcode 0x${props.opcode.toString(16).toUpperCase().padStart(4, '0')} (${props.direction})\n// Available methods:\n//   packet.readByte(name), packet.readShort(name)\n//   packet.readInt(name), packet.readLong(name)\n//   packet.readString(name), packet.readBytes(name, len)\n//   packet.readObject(name, fn), packet.readArray(name, count|null, fn)\n//   packet.skip(name, len), packet.remaining()\n\n`
+        code.value = `// Parse opcode 0x${props.opcode.toString(16).toUpperCase().padStart(4, '0')} (${props.direction})\n// Available methods:\n//   packet.readByte(name), packet.readShort(name)\n//   packet.readInt(name), packet.readLong(name)\n//   packet.readString(name, size), packet.readMapleString(name)\n//   packet.readBytes(name, len), packet.readFileTime(name)\n//   packet.readObject(name, fn), packet.readArray(name, count|null, fn)\n//   packet.skip(name, len), packet.remaining()\n\n`
       }
     } catch {
       code.value = ''
