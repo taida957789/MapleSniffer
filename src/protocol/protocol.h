@@ -86,6 +86,9 @@ public:
     const std::string& subVersionStr() const { return subVersionStr_; }
     uint8_t localeVal() const { return locale_; }
 
+    // Session identifier (assigned by Protocol)
+    uint32_t sessionId_ = 0;
+
     // The server endpoint (as seen in handshake)
     uint32_t serverIP = 0;
     uint16_t serverPort = 0;
@@ -104,13 +107,15 @@ private:
     uint8_t sendIV_[4]{};
     uint8_t recvIV_[4]{};
 
-    // TCP reassembly (per direction)
+    // TCP reassembly (per direction) — only used AFTER handshake
     TcpReasm serverReasm_;  // server → client (inbound)
     TcpReasm clientReasm_;  // client → server (outbound)
 
-    // Pending bytes before handshake is detected
+    // Before handshake: raw segment payloads (no reassembly needed)
     std::vector<uint8_t> pendingInbound_;   // inbound: for handshake detection
     std::vector<uint8_t> pendingOutbound_;  // outbound: buffered until handshake completes
+    uint32_t lastServerSeqEnd_ = 0;  // track seq for TcpReasm init after handshake
+    uint32_t lastClientSeqEnd_ = 0;
 
     // MapleStory protocol streams (created after handshake)
     std::unique_ptr<MapleStream> outboundStream_;
@@ -138,6 +143,7 @@ private:
 
     std::map<ConnectionKey, std::shared_ptr<Session>> sessions_;
     std::mutex mutex_;
+    uint32_t nextSessionId_ = 1;
 };
 
 } // namespace maple

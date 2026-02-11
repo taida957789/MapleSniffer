@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <iostream>
 #include <openssl/evp.h>
 
 namespace maple {
@@ -100,12 +101,11 @@ std::optional<DecryptedPacket> MapleStream::tryRead(double timestamp) {
     pkt.timestamp = timestamp;
     pkt.outbound = outbound_;
     pkt.opcode = opcode;
-    pkt.length = static_cast<uint32_t>(packetSize);
-
     // Payload is everything after opcode
     if (packetSize > 2) {
         pkt.payload.assign(packetBuffer.begin() + 2, packetBuffer.end());
     }
+    pkt.length = static_cast<uint32_t>(pkt.payload.size());
 
     // Check for opcode encryption packet (inbound opcode 0x46)
     if (!outbound_ && opcode == 0x46 && pkt.payload.size() >= 4) {
@@ -118,6 +118,7 @@ std::optional<DecryptedPacket> MapleStream::tryRead(double timestamp) {
                 pkt.payload.data() + 4, static_cast<int>(pkt.payload.size()) - 4, bufferSize);
             opcodeEncrypted_ = true;
         }
+        std::cout << "Encrypted opcodes: " << encryptedOpcodes_.size() << std::endl;
     }
 
     // Replace encrypted opcode with real opcode for outbound packets
@@ -128,8 +129,8 @@ std::optional<DecryptedPacket> MapleStream::tryRead(double timestamp) {
         }
     }
 
-    // Generate hex dump of decrypted data
-    pkt.hexDump = toHexDump(packetBuffer.data(), packetBuffer.size());
+    // Generate hex dump of payload (after opcode)
+    pkt.hexDump = toHexDump(pkt.payload.data(), pkt.payload.size());
 
     // Reset expected size for next packet
     expectedDataSize_ = 4;

@@ -111,13 +111,18 @@ bool Capture::start(const std::string& interfaceName, const std::string& bpfFilt
         interfaceName.c_str(),
         65535,  // snaplen
         1,      // promisc
-        1000,   // timeout ms
+        1,      // timeout ms (low latency)
         errbuf
     );
 
     if (!handle_) {
         std::cerr << "[Capture] Error opening device: " << errbuf << std::endl;
         return false;
+    }
+
+    // Increase kernel buffer to 128MB to avoid drops during bursts
+    if (pcap_setbuff(handle_, 128 * 1024 * 1024) != 0) {
+        std::cerr << "[Capture] Warning: failed to set buffer size" << std::endl;
     }
 
     if (!bpfFilter.empty()) {

@@ -1,44 +1,36 @@
 #include "capture/capture.h"
 #include "protocol/protocol.h"
-#include "server/server.h"
-#include <iostream>
-#include <csignal>
-#include <atomic>
+#include "app/app.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
-static std::atomic<bool> g_running{true};
+coco::stray start(saucer::application *app) {
+    maple::Capture capture;
+    maple::Protocol protocol;
+    maple::App mApp(capture);
 
-void signalHandler(int) {
-    g_running = false;
+    capture.setPacketCallback([&protocol, &mApp](const maple::RawPacket& raw) {
+        try {
+            auto packets = protocol.process(raw);
+            if (!packets.empty()) {
+                mApp.addPackets(packets);
+            }
+        } catch (...) {}
+    });
+
+    mApp.setup(app);
+
+    co_await app->finish();
+    capture.stop();
 }
 
 int main() {
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
-
-    std::cout << "=== MapleAuto ===" << std::endl;
-
-    maple::Capture capture;
-    maple::Protocol protocol;
-    maple::Server server(capture, 8080);
-
-    // Wire capture -> protocol -> server
-    capture.setPacketCallback([&protocol, &server](const maple::RawPacket& raw) {
-        auto packets = protocol.process(raw);
-        if (!packets.empty()) {
-            server.addPackets(packets);
-        }
-    });
-
-    server.start();
-
-    std::cout << "Press Ctrl+C to stop..." << std::endl;
-    while (g_running) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    std::cout << "\nShutting down..." << std::endl;
-    capture.stop();
-    server.stop();
-
-    return 0;
+    return saucer::application::create({.id = "maple-sniffer"})->run(start);
 }
+
+#ifdef _WIN32
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    return main();
+}
+#endif

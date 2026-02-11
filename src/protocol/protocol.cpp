@@ -1,6 +1,7 @@
 #include "protocol.h"
 #include <sstream>
 #include <iomanip>
+#include <iostream>
 #include <cstring>
 #include <algorithm>
 
@@ -27,8 +28,10 @@ std::vector<uint8_t> TcpReasm::drain(bool holdLast) {
         auto it = staged.begin();
         uint32_t segSeq = it->first;
 
-        // Gap: segment starts after nextSeq
-        if (static_cast<int32_t>(segSeq - nextSeq) > 0) break;
+        // Gap: segment starts after nextSeq (pcap dropped a segment)
+        if (static_cast<int32_t>(segSeq - nextSeq) > 0) {
+            break;
+        }
 
         uint32_t segEnd = segSeq + static_cast<uint32_t>(it->second.size());
 
@@ -135,6 +138,7 @@ std::vector<Packet> Protocol::process(const RawPacket& raw) {
             // SYN (client → server)
             if (!session) {
                 session = std::make_shared<Session>();
+                session->sessionId_ = nextSessionId_++;
                 session->clientPort = seg.srcPort;
                 sessions_[fwdKey] = session;
             }
@@ -157,6 +161,7 @@ std::vector<Packet> Protocol::process(const RawPacket& raw) {
     // No session yet: create one (will detect handshake from reassembled stream)
     if (!session) {
         session = std::make_shared<Session>();
+        session->sessionId_ = nextSessionId_++;
         sessions_[fwdKey] = session;
     }
 
@@ -196,82 +201,78 @@ std::string Protocol::toHexDump(const uint8_t* data, size_t len, size_t /*maxByt
 
 std::vector<DecryptedPacket> Session::processSegment(const TcpSegment& seg, double timestamp) {
     std::vector<DecryptedPacket> results;
-    if (terminated_) return results;
-    if (seg.payloadLen <= 0) return results;
+    if (terminated_ || seg.payloadLen <= 0) return results;
 
-    // Step 1: Determine direction and add to TCP reassembly
+    // Determine direction
     bool isFromServer = false;
     if (initialized_) {
         isFromServer = (seg.srcIP == serverIP && seg.srcPort == serverPort);
     } else {
-        // Before handshake: assume server is the first sender we see
-        // (or use port heuristic: server port is in the game port range)
-        // For now, try both directions; handshake detection will determine
         isFromServer = true; // First data should be server handshake
         if (clientPort != 0 && seg.srcPort == clientPort) {
             isFromServer = false;
         }
     }
 
+    // === Before handshake: raw segment payloads, NO reassembly ===
+    // The handshake is small (fits in one segment). Using TcpReasm here
+    // causes issues with probe/replacement segments and holdLast delays.
+    if (!initialized_) {
+        if (isFromServer) {
+            if (serverIP == 0) {
+                serverIP = seg.srcIP;
+                serverPort = seg.srcPort;
+            }
+            pendingInbound_.insert(pendingInbound_.end(),
+                seg.payload, seg.payload + seg.payloadLen);
+            lastServerSeqEnd_ = seg.seq + static_cast<uint32_t>(seg.payloadLen);
+
+            auto hsPkt = tryDetectHandshake(timestamp);
+            if (hsPkt.has_value()) {
+                results.push_back(std::move(*hsPkt));
+
+                // Initialize TcpReasm for post-handshake traffic
+                serverReasm_.init(lastServerSeqEnd_);
+                if (lastClientSeqEnd_ != 0) {
+                    clientReasm_.init(lastClientSeqEnd_);
+                }
+
+                // Feed remaining inbound bytes after handshake
+                if (!pendingInbound_.empty() && inboundStream_) {
+                    auto inPkts = feedStream(inboundStream_.get(),
+                        pendingInbound_.data(), static_cast<int>(pendingInbound_.size()), timestamp);
+                    for (auto& p : inPkts) results.push_back(std::move(p));
+                    pendingInbound_.clear();
+                }
+
+                // Feed buffered outbound data
+                if (!pendingOutbound_.empty() && outboundStream_) {
+                    auto outPkts = feedStream(outboundStream_.get(),
+                        pendingOutbound_.data(), static_cast<int>(pendingOutbound_.size()), timestamp);
+                    for (auto& p : outPkts) results.push_back(std::move(p));
+                    pendingOutbound_.clear();
+                }
+            }
+        } else {
+            pendingOutbound_.insert(pendingOutbound_.end(),
+                seg.payload, seg.payload + seg.payloadLen);
+            lastClientSeqEnd_ = seg.seq + static_cast<uint32_t>(seg.payloadLen);
+        }
+        return results;
+    }
+
+    // === After handshake: TcpReasm-based flow ===
     TcpReasm& reasm = isFromServer ? serverReasm_ : clientReasm_;
     reasm.addSegment(seg.seq, seg.payload, seg.payloadLen);
 
-    // Step 2: Drain reassembled bytes
-    // Inbound (server): holdLast=true to handle segment replacement (zero-byte prefix)
-    // Outbound (client): holdLast=false for immediate delivery
+    // holdLast=true for inbound (probe/replacement protection)
     auto bytes = reasm.drain(isFromServer);
-
     if (bytes.empty()) return results;
 
-    // Step 3: Protocol parsing
-    if (!initialized_ && isFromServer) {
-        // Record server endpoint for session matching
-        if (serverIP == 0) {
-            serverIP = seg.srcIP;
-            serverPort = seg.srcPort;
-        }
-
-        // Accumulate inbound bytes for handshake detection
-        pendingInbound_.insert(pendingInbound_.end(), bytes.begin(), bytes.end());
-
-        auto hsPkt = tryDetectHandshake(timestamp);
-        if (hsPkt.has_value()) {
-            results.push_back(std::move(*hsPkt));
-
-            // Feed any remaining bytes after handshake to inbound stream
-            if (!pendingInbound_.empty() && inboundStream_) {
-                auto inPkts = feedStream(inboundStream_.get(),
-                    pendingInbound_.data(), static_cast<int>(pendingInbound_.size()), timestamp);
-                for (auto& p : inPkts) results.push_back(std::move(p));
-                pendingInbound_.clear();
-            }
-
-            // Replay buffered outbound data now that we have the encryption keys
-            if (!pendingOutbound_.empty() && outboundStream_) {
-                auto outPkts = feedStream(outboundStream_.get(),
-                    pendingOutbound_.data(), static_cast<int>(pendingOutbound_.size()), timestamp);
-                for (auto& p : outPkts) results.push_back(std::move(p));
-                pendingOutbound_.clear();
-            }
-        }
-        return results;
-    }
-
-    if (!initialized_ && !isFromServer) {
-        // Buffer outbound data until handshake is detected
-        // (outbound may arrive before inbound handshake due to holdLast delay)
-        pendingOutbound_.insert(pendingOutbound_.end(), bytes.begin(), bytes.end());
-        return results;
-    }
-
-    // Step 4: Feed to MapleStream for decryption
     MapleStream* stream = isFromServer ? inboundStream_.get() : outboundStream_.get();
     if (!stream) return results;
 
-    auto pkts = feedStream(stream, bytes.data(), static_cast<int>(bytes.size()), timestamp);
-    for (auto& p : pkts) results.push_back(std::move(p));
-
-    return results;
+    return feedStream(stream, bytes.data(), static_cast<int>(bytes.size()), timestamp);
 }
 
 std::optional<DecryptedPacket> Session::tryDetectHandshake(double timestamp) {
@@ -361,6 +362,8 @@ std::optional<DecryptedPacket> Session::tryDetectHandshake(double timestamp) {
     hsPkt.version = version_;
     hsPkt.subVersionStr = subVersionStr_;
     hsPkt.locale = locale_;
+    hsPkt.sessionId = sessionId_;
+    hsPkt.serverPort = serverPort;
 
     // Remove handshake bytes from pending buffer, keep remainder
     pendingInbound_.erase(pendingInbound_.begin(), pendingInbound_.begin() + hsTotal);
@@ -396,6 +399,8 @@ std::vector<DecryptedPacket> Session::feedStream(MapleStream* stream, const uint
             }
         }
 
+        pkt->sessionId = sessionId_;
+        pkt->serverPort = serverPort;
         results.push_back(std::move(*pkt));
     }
 

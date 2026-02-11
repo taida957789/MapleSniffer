@@ -19,6 +19,10 @@ struct DecryptedPacket {
     uint32_t length;               // total decrypted size (opcode + payload)
     bool isHandshake = false;
 
+    // Session tracking
+    uint32_t sessionId = 0;
+    uint16_t serverPort = 0;
+
     // Handshake fields
     uint16_t version = 0;
     std::string subVersionStr;
