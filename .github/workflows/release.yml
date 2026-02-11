@@ -1,0 +1,67 @@
+name: Build Release
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup vcpkg
+        run: |
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+
+      - name: Configure CMake
+        run: cmake --preset ci-release
+
+      - name: Build
+        run: cmake --build out/build/ci-release
+
+      - name: Package release
+        run: |
+          $outDir = "out/build/ci-release"
+          $distDir = "dist"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+
+          # Copy exe
+          Copy-Item "$outDir/MapleSniffer.exe" $distDir/
+
+          # Copy DLLs from vcpkg
+          $binDir = "$outDir/vcpkg_installed/x64-windows/bin"
+          if (Test-Path $binDir) {
+            Get-ChildItem "$binDir/*.dll" | Copy-Item -Destination $distDir/
+          }
+
+          # Copy icon
+          Copy-Item "icon.ico" $distDir/
+
+          # Create zip
+          Compress-Archive -Path "$distDir/*" -DestinationPath "MapleSniffer-${{ github.event.release.tag_name }}.zip"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MapleSniffer-${{ github.event.release.tag_name }}.zip
