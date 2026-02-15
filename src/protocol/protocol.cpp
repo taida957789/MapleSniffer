@@ -7,50 +7,6 @@
 
 namespace maple {
 
-// --- TcpReasm ---
-
-void TcpReasm::addSegment(uint32_t seq, const uint8_t* data, int len) {
-    if (len <= 0) return;
-    if (!initialized) { initialized = true; nextSeq = seq; }
-
-    // Insert or replace (keep the longer segment at the same seq)
-    auto it = staged.find(seq);
-    if (it == staged.end() || static_cast<int>(it->second.size()) < len) {
-        staged[seq].assign(data, data + len);
-    }
-}
-
-std::vector<uint8_t> TcpReasm::drain(bool holdLast) {
-    std::vector<uint8_t> result;
-    size_t minSize = holdLast ? 1u : 0u;
-
-    while (staged.size() > minSize) {
-        auto it = staged.begin();
-        uint32_t segSeq = it->first;
-
-        // Gap: segment starts after nextSeq (pcap dropped a segment)
-        if (static_cast<int32_t>(segSeq - nextSeq) > 0) {
-            break;
-        }
-
-        uint32_t segEnd = segSeq + static_cast<uint32_t>(it->second.size());
-
-        // Fully before nextSeq: already delivered, discard
-        if (static_cast<int32_t>(segEnd - nextSeq) <= 0) {
-            staged.erase(it);
-            continue;
-        }
-
-        // Deliver new bytes (skip any overlap at the beginning)
-        uint32_t offset = nextSeq - segSeq;  // 0 if in-order, >0 if partial overlap
-        result.insert(result.end(), it->second.begin() + offset, it->second.end());
-        nextSeq = segEnd;
-        staged.erase(it);
-    }
-
-    return result;
-}
-
 // --- Protocol ---
 
 bool Protocol::parseTcp(const uint8_t* data, int len, TcpSegment& seg) {
@@ -121,14 +77,14 @@ std::vector<Packet> Protocol::process(const RawPacket& raw) {
         }
     }
 
-    // FIN/RST: terminate or remove session
-    if (seg.fin && session) {
-        session->terminate();
-        return results;
-    }
-    if (seg.rst && session) {
-        sessions_.erase(fwdKey);
-        sessions_.erase(revKey);
+    // FIN/RST: remove all keys pointing to this session
+    if ((seg.fin || seg.rst) && session) {
+        for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+            if (it->second == session)
+                it = sessions_.erase(it);
+            else
+                ++it;
+        }
         return results;
     }
 
@@ -136,12 +92,20 @@ std::vector<Packet> Protocol::process(const RawPacket& raw) {
     if (seg.syn) {
         if (!seg.ack) {
             // SYN (client → server)
-            if (!session) {
-                session = std::make_shared<Session>();
-                session->sessionId_ = nextSessionId_++;
-                session->clientPort = seg.srcPort;
-                sessions_[fwdKey] = session;
+            // Always create a fresh session — handles reconnection on same port pair
+            // where the old FIN/RST was missed by pcap
+            if (session) {
+                for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+                    if (it->second == session)
+                        it = sessions_.erase(it);
+                    else
+                        ++it;
+                }
             }
+            session = std::make_shared<Session>();
+            session->sessionId_ = nextSessionId_++;
+            session->clientPort = seg.srcPort;
+            sessions_[fwdKey] = session;
             session->initClientSeq(seg.seq + 1);
         } else {
             // SYN-ACK (server → client)
@@ -402,6 +366,20 @@ std::vector<DecryptedPacket> Session::feedStream(MapleStream* stream, const uint
         pkt->sessionId = sessionId_;
         pkt->serverPort = serverPort;
         results.push_back(std::move(*pkt));
+    }
+
+    // Emit dead notification if stream just desynchronized
+    if (stream->isDead() && !deadNotified_) {
+        deadNotified_ = true;
+        DecryptedPacket deadPkt;
+        deadPkt.timestamp = timestamp;
+        deadPkt.outbound = stream == outboundStream_.get();
+        deadPkt.opcode = 0;
+        deadPkt.length = 0;
+        deadPkt.isDeadNotification = true;
+        deadPkt.sessionId = sessionId_;
+        deadPkt.serverPort = serverPort;
+        results.push_back(std::move(deadPkt));
     }
 
     return results;

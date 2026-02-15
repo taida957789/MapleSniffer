@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
-#include <iostream>
 #include <openssl/evp.h>
 
 namespace maple {
@@ -28,7 +27,7 @@ MapleStream::MapleStream(bool outbound, uint16_t build, uint8_t locale,
 }
 
 void MapleStream::append(const uint8_t* data, int len) {
-    if (len <= 0) return;
+    if (dead_ || len <= 0) return;
 
     // Grow buffer if needed
     while (static_cast<int>(buffer_.size()) - cursor_ < len) {
@@ -49,10 +48,12 @@ static std::string toHexDump(const uint8_t* data, size_t len) {
 }
 
 std::optional<DecryptedPacket> MapleStream::tryRead(double timestamp) {
-    if (cursor_ < expectedDataSize_) return std::nullopt;
+    if (dead_ || cursor_ < expectedDataSize_) return std::nullopt;
 
-    // Validate header
+    // Validate header — IV-synced stream, cannot resync on failure
     if (!aes_->confirmHeader(buffer_.data())) {
+        cursor_ = 0;
+        dead_ = true;
         return std::nullopt;
     }
 
@@ -105,21 +106,7 @@ std::optional<DecryptedPacket> MapleStream::tryRead(double timestamp) {
     if (packetSize > 2) {
         pkt.payload.assign(packetBuffer.begin() + 2, packetBuffer.end());
     }
-    pkt.length = static_cast<uint32_t>(pkt.payload.size());
-
-    // Check for opcode encryption packet (inbound opcode 0x46)
-    if (!outbound_ && opcode == 0x46 && pkt.payload.size() >= 4) {
-        int32_t bufferSize = static_cast<int32_t>(
-            pkt.payload[0] | (pkt.payload[1] << 8) |
-            (pkt.payload[2] << 16) | (pkt.payload[3] << 24)
-        );
-        if (bufferSize > 0 && static_cast<int>(pkt.payload.size()) >= 4 + bufferSize) {
-            encryptedOpcodes_ = parseOpcodeEncryption(
-                pkt.payload.data() + 4, static_cast<int>(pkt.payload.size()) - 4, bufferSize);
-            opcodeEncrypted_ = true;
-        }
-        std::cout << "Encrypted opcodes: " << encryptedOpcodes_.size() << std::endl;
-    }
+    pkt.length = static_cast<uint32_t>(packetSize);
 
     // Replace encrypted opcode with real opcode for outbound packets
     if (opcodeEncrypted_ && outbound_) {

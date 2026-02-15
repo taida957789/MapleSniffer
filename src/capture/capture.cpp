@@ -193,9 +193,14 @@ void Capture::pcapCallback(u_char* user, const pcap_pkthdr* header, const u_char
     pkt.timestamp = header->ts.tv_sec + header->ts.tv_usec / 1000000.0;
     pkt.data.assign(packet, packet + header->caplen);
 
-    std::lock_guard<std::mutex> lock(self->mutex_);
-    if (self->callback_) {
-        self->callback_(pkt);
+    // Copy callback under lock, invoke outside to avoid blocking capture thread
+    PacketCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(self->mutex_);
+        cb = self->callback_;
+    }
+    if (cb) {
+        cb(pkt);
     }
 }
 

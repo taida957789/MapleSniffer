@@ -18,6 +18,7 @@ struct DecryptedPacket {
     std::string hexDump;
     uint32_t length;               // total decrypted size (opcode + payload)
     bool isHandshake = false;
+    bool isDeadNotification = false;
 
     // Session tracking
     uint32_t sessionId = 0;
@@ -40,6 +41,8 @@ public:
     // Try to read one complete decrypted packet
     std::optional<DecryptedPacket> tryRead(double timestamp);
 
+    bool isDead() const { return dead_; }
+
     // Opcode encryption support
     void setOpcodeEncrypted(bool v) { opcodeEncrypted_ = v; }
     void setEncryptedOpcodes(const std::unordered_map<int, uint16_t>& map) { encryptedOpcodes_ = map; }
@@ -54,6 +57,7 @@ public:
 private:
     bool outbound_;
     bool useNewDataShift_ = false;  // inbound on game server (non-8484)
+    bool dead_ = false;             // stream desynchronized, no further reads
     std::unique_ptr<MapleAES> aes_;
     std::vector<uint8_t> buffer_;
     int cursor_ = 0;

@@ -49,6 +49,7 @@ const highlightRange = ref<{ offset: number; length: number } | null>(null)
 // User byte selection state (for byte inspector)
 const userSelection = ref<{ start: number; end: number } | null>(null)
 const inspectorPos = ref<{ x: number; y: number }>({ x: 0, y: 0 })
+const dragAnchor = ref<number | null>(null)
 
 // Script system state
 const selectedPacket = ref<PacketInfo | null>(null)
@@ -140,9 +141,12 @@ async function decryptOpcodeEncryption() {
 }
 
 // Close context menu on click anywhere
-function onDocumentClick() {
+function onDocumentClick(event: MouseEvent) {
   if (contextMenu.value) closeContextMenu()
-  userSelection.value = null
+  const target = event.target as HTMLElement
+  if (!target.closest('.hex-interactive') && !target.closest('.inspector-popup')) {
+    userSelection.value = null
+  }
 }
 
 // --- Opcode names ---
@@ -348,7 +352,8 @@ async function importSession(event: Event) {
       version: data.session.version ?? 0,
       subVersion: data.session.subVersion ?? '',
       serverPort: data.session.serverPort ?? 0,
-      timestamp: data.session.timestamp ?? 0
+      timestamp: data.session.timestamp ?? 0,
+      dead: false
     }
 
     sessions.value.push(imported)
@@ -411,17 +416,33 @@ function isUserSelected(byteIndex: number): boolean {
   return byteIndex >= userSelection.value.start && byteIndex <= userSelection.value.end
 }
 
-function onByteClick(byteIndex: number, event: MouseEvent) {
+function onByteMouseDown(byteIndex: number, event: MouseEvent) {
+  if (event.button !== 0) return
   if (event.shiftKey && userSelection.value) {
     userSelection.value = {
       start: Math.min(userSelection.value.start, byteIndex),
       end: Math.max(userSelection.value.start, byteIndex)
     }
   } else {
+    dragAnchor.value = byteIndex
     userSelection.value = { start: byteIndex, end: byteIndex }
   }
   inspectorPos.value = { x: event.clientX, y: event.clientY }
   highlightRange.value = null
+}
+
+function onByteMouseMove(byteIndex: number, event: MouseEvent) {
+  if (dragAnchor.value === null) return
+  const anchor = dragAnchor.value
+  userSelection.value = {
+    start: Math.min(anchor, byteIndex),
+    end: Math.max(anchor, byteIndex)
+  }
+  inspectorPos.value = { x: event.clientX, y: event.clientY }
+}
+
+function onDocumentMouseUp() {
+  dragAnchor.value = null
 }
 
 const selectedBytes = computed((): number[] => {
@@ -662,6 +683,7 @@ const handshakeFields = computed((): ParsedField[] => {
 
 onMounted(async () => {
   document.addEventListener('click', onDocumentClick)
+  document.addEventListener('mouseup', onDocumentMouseUp)
   await loadInterfaces()
   await loadStatus()
   if (status.value.capturing) {
@@ -683,6 +705,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener('click', onDocumentClick)
+  document.removeEventListener('mouseup', onDocumentMouseUp)
   if (pollTimer) clearInterval(pollTimer)
 })
 </script>
@@ -775,9 +798,9 @@ onUnmounted(() => {
         v-for="s in sessions"
         :key="s.id"
         class="session-tab"
-        :class="{ active: activeSessionId === s.id }"
+        :class="{ active: activeSessionId === s.id, dead: s.dead }"
         @click="switchSession(s.id)"
-      >{{ sessionLabel(s) }}</button>
+      >{{ sessionLabel(s) }}<span v-if="s.dead" class="dead-badge">DEAD</span></button>
       <button
         v-if="activeSessionId !== null"
         class="btn-session-action"
@@ -917,7 +940,8 @@ onUnmounted(() => {
                   'hex-hl': isHighlighted(rowIdx * 16 + colIdx),
                   'hex-sel': isUserSelected(rowIdx * 16 + colIdx)
                 }"
-                @click.stop="onByteClick(rowIdx * 16 + colIdx, $event)"
+                @mousedown.stop.prevent="onByteMouseDown(rowIdx * 16 + colIdx, $event)"
+                @mousemove="onByteMouseMove(rowIdx * 16 + colIdx, $event)"
               >{{ byte }}</span>
             </div>
           </div>
@@ -1209,6 +1233,20 @@ button:hover {
   border-color: #5a4a1a;
 }
 
+.session-tab.dead {
+  opacity: 0.5;
+}
+
+.dead-badge {
+  margin-left: 6px;
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #ff4444;
+  color: #fff;
+  vertical-align: middle;
+}
+
 .btn-session-action {
   padding: 5px 12px;
   font-size: 11px;
@@ -1474,6 +1512,7 @@ button:hover {
 .hex-interactive {
   white-space: normal;
   word-break: normal;
+  user-select: none;
 }
 
 .hex-row {

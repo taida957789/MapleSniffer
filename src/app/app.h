@@ -46,6 +46,8 @@ private:
     std::deque<Packet> packets_;
     std::mutex packetsMutex_;
     static constexpr size_t MAX_PACKETS = 500;
+    uint64_t nextPacketSeq_ = 0;   // monotonic sequence number
+    uint64_t baseSeq_ = 0;         // seq of packets_.front()
 
     // Script system
     std::filesystem::path scriptsBasePath_;
@@ -58,6 +60,7 @@ private:
         std::string subVersion;
         uint16_t serverPort;
         double timestamp;
+        bool dead = false;
     };
     std::vector<SessionMeta> sessions_;
 };

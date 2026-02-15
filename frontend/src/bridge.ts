@@ -35,6 +35,7 @@ export interface SessionMeta {
   subVersion: string
   serverPort: number
   timestamp: number
+  dead: boolean
 }
 
 export interface ScriptEntry {

@@ -44,13 +44,14 @@ FetchContent_MakeAvailable(saucer)
 set(SOURCES
     src/main.cpp
     src/capture/capture.cpp
+    src/protocol/tcp_reasm.cpp
     src/protocol/protocol.cpp
     src/protocol/maple_aes.cpp
     src/protocol/maple_stream.cpp
     src/app/app.cpp
 )
 
-add_executable(MapleSniffer WIN32 ${SOURCES} app.rc)
+add_executable(MapleSniffer ${SOURCES} app.rc)
 
 # --- Embed frontend into binary (must come after add_executable) ---
 saucer_embed("frontend/dist" TARGET MapleSniffer)

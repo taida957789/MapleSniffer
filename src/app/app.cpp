@@ -156,9 +156,19 @@ void App::addPackets(const std::vector<Packet>& pkts) {
                 });
             }
         }
+
+        // Mark session dead on stream desync notification
+        if (pkt.isDeadNotification) {
+            for (auto& s : sessions_) {
+                if (s.id == pkt.sessionId) { s.dead = true; break; }
+            }
+        }
+
         packets_.push_back(pkt);
+        nextPacketSeq_++;
         if (packets_.size() > MAX_PACKETS) {
             packets_.pop_front();
+            baseSeq_++;
         }
     }
 }
@@ -191,33 +201,38 @@ std::string App::getInterfaces() {
 std::string App::getPackets(int since) {
     std::lock_guard<std::mutex> lock(packetsMutex_);
     json j = json::array();
-    int idx = 0;
-    for (const auto& pkt : packets_) {
-        if (idx >= since) {
-            json pktJson;
-            pktJson["index"] = idx;
-            pktJson["timestamp"] = pkt.timestamp;
-            pktJson["length"] = pkt.length;
-            pktJson["hexDump"] = pkt.hexDump;
-            pktJson["outbound"] = pkt.outbound;
-            pktJson["isHandshake"] = pkt.isHandshake;
-            pktJson["sessionId"] = pkt.sessionId;
 
-            if (pkt.isHandshake) {
-                pktJson["opcode"] = "Handshake";
-                pktJson["opcodeRaw"] = 0;
-                pktJson["version"] = pkt.version;
-                pktJson["subVersion"] = pkt.subVersionStr;
-                pktJson["locale"] = pkt.locale;
-            } else {
-                pktJson["opcode"] = formatOpcode(pkt.opcode);
-                pktJson["opcodeRaw"] = pkt.opcode;
-            }
+    // since is a monotonic sequence number; convert to deque offset
+    uint64_t sinceSeq = static_cast<uint64_t>(since);
+    size_t startOffset = 0;
+    if (sinceSeq > baseSeq_) {
+        startOffset = static_cast<size_t>(sinceSeq - baseSeq_);
+    }
 
-            pktJson["decrypted"] = !pkt.isHandshake;
-            j.push_back(pktJson);
+    for (size_t i = startOffset; i < packets_.size(); i++) {
+        const auto& pkt = packets_[i];
+        json pktJson;
+        pktJson["index"] = static_cast<uint64_t>(baseSeq_ + i);
+        pktJson["timestamp"] = pkt.timestamp;
+        pktJson["length"] = pkt.length;
+        pktJson["hexDump"] = pkt.hexDump;
+        pktJson["outbound"] = pkt.outbound;
+        pktJson["isHandshake"] = pkt.isHandshake;
+        pktJson["sessionId"] = pkt.sessionId;
+
+        if (pkt.isHandshake) {
+            pktJson["opcode"] = "Handshake";
+            pktJson["opcodeRaw"] = 0;
+            pktJson["version"] = pkt.version;
+            pktJson["subVersion"] = pkt.subVersionStr;
+            pktJson["locale"] = pkt.locale;
+        } else {
+            pktJson["opcode"] = formatOpcode(pkt.opcode);
+            pktJson["opcodeRaw"] = pkt.opcode;
         }
-        idx++;
+
+        pktJson["decrypted"] = !pkt.isHandshake;
+        j.push_back(pktJson);
     }
     return j.dump();
 }
@@ -233,6 +248,8 @@ bool App::startCapture(const std::string& iface, const std::string& filter) {
         std::lock_guard<std::mutex> lock(packetsMutex_);
         packets_.clear();
         sessions_.clear();
+        nextPacketSeq_ = 0;
+        baseSeq_ = 0;
     }
 
     return capture_.start(iface, filter);
@@ -320,7 +337,8 @@ std::string App::getSessions() {
             {"version", s.version},
             {"subVersion", s.subVersion},
             {"serverPort", s.serverPort},
-            {"timestamp", s.timestamp}
+            {"timestamp", s.timestamp},
+            {"dead", s.dead}
         });
     }
     return j.dump();
